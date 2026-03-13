@@ -2537,6 +2537,34 @@ function startIpcWatcher(): void {
                     )
                   ) {
                     await sendMessage(data.chatJid, data.text);
+
+                    // Conversation agents: also send to bound IM channels.
+                    // sendMessage() above uses the virtual JID (web:main#agent:xxx)
+                    // which is NOT an IM channel, so IM send is skipped.
+                    // We must explicitly route to IM groups bound via target_agent_id.
+                    if (data.chatJid.includes('#agent:')) {
+                      const agentIdFromJid = data.chatJid.split('#agent:')[1];
+                      const folder = resolveEffectiveFolder(baseChatJid);
+                      const localImagePaths = extractLocalImImagePaths(
+                        data.text,
+                        folder,
+                      );
+                      for (const [imJid, g] of Object.entries(
+                        registeredGroups,
+                      )) {
+                        if (
+                          g.target_agent_id === agentIdFromJid &&
+                          getChannelType(imJid) !== null
+                        ) {
+                          sendImWithFailTracking(
+                            imJid,
+                            data.text,
+                            localImagePaths,
+                          );
+                        }
+                      }
+                    }
+
                     logger.info(
                       { chatJid: data.chatJid, sourceGroup },
                       'IPC message sent',
@@ -3192,7 +3220,20 @@ async function processTaskIpc(
             break;
           }
 
-          await imManager.sendFile(sendFileBaseChatJid, resolvedPath, data.fileName);
+          // For conversation agents, route to bound IM channels
+          if (data.chatJid.includes('#agent:')) {
+            const agentIdFromJid = data.chatJid.split('#agent:')[1];
+            for (const [imJid, g] of Object.entries(registeredGroups)) {
+              if (
+                g.target_agent_id === agentIdFromJid &&
+                getChannelType(imJid) !== null
+              ) {
+                await imManager.sendFile(imJid, resolvedPath, data.fileName);
+              }
+            }
+          } else {
+            await imManager.sendFile(sendFileBaseChatJid, resolvedPath, data.fileName);
+          }
           logger.info(
             { sourceGroup, chatJid: data.chatJid, fileName: data.fileName },
             'File sent via IPC',
