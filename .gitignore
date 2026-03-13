@@ -28,6 +28,9 @@ dist/
 *.db-shm
 *.sqlite
 
+# User skills — personal / private, must not be committed
+container/skills/
+
 # Local tooling metadata
 .claude/
 .mcp.json

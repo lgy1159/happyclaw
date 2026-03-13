@@ -2521,7 +2521,12 @@ function startIpcWatcher(): void {
               try {
                 const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
                 if (data.type === 'message' && data.chatJid && data.text) {
-                  const targetGroup = registeredGroups[data.chatJid];
+                  // Conversation agents use virtual JIDs like "web:main#agent:xxx"
+                  // Extract base JID for permission checks, keep full JID for routing
+                  const baseChatJid = data.chatJid.includes('#agent:')
+                    ? data.chatJid.split('#agent:')[0]
+                    : data.chatJid;
+                  const targetGroup = registeredGroups[baseChatJid];
                   if (
                     canSendCrossGroupMessage(
                       isAdminHome,
@@ -2548,7 +2553,11 @@ function startIpcWatcher(): void {
                   data.imageBase64
                 ) {
                   // Handle image IPC messages from send_image MCP tool
-                  const targetGroup = registeredGroups[data.chatJid];
+                  // Extract base JID for permission checks (conversation agents use #agent: suffix)
+                  const baseChatJid = data.chatJid.includes('#agent:')
+                    ? data.chatJid.split('#agent:')[0]
+                    : data.chatJid;
+                  const targetGroup = registeredGroups[baseChatJid];
                   if (
                     canSendCrossGroupMessage(
                       isAdminHome,
@@ -2567,9 +2576,9 @@ function startIpcWatcher(): void {
                       const caption = data.caption || undefined;
                       const fileName = data.fileName || undefined;
 
-                      // Send to IM channel (caption is included in the image message itself)
+                      // Send to IM channel using base JID (strip #agent: suffix)
                       await imManager.sendImage(
-                        data.chatJid,
+                        baseChatJid,
                         imageBuffer,
                         mimeType,
                         caption,
@@ -3147,7 +3156,11 @@ async function processTaskIpc(
     case 'send_file':
       if (data.chatJid && data.filePath && data.fileName) {
         // Cross-group authorization check (same as send_message)
-        const targetGroup = registeredGroups[data.chatJid];
+        // Extract base JID for permission checks (conversation agents use #agent: suffix)
+        const sendFileBaseChatJid = data.chatJid.includes('#agent:')
+          ? data.chatJid.split('#agent:')[0]
+          : data.chatJid;
+        const targetGroup = registeredGroups[sendFileBaseChatJid];
         if (
           !canSendCrossGroupMessage(
             isAdminHome,
@@ -3179,7 +3192,7 @@ async function processTaskIpc(
             break;
           }
 
-          await imManager.sendFile(data.chatJid, resolvedPath, data.fileName);
+          await imManager.sendFile(sendFileBaseChatJid, resolvedPath, data.fileName);
           logger.info(
             { sourceGroup, chatJid: data.chatJid, fileName: data.fileName },
             'File sent via IPC',

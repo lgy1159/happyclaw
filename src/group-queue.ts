@@ -37,6 +37,9 @@ interface GroupState {
   retryCount: number;
   retryTimer: ReturnType<typeof setTimeout> | null;
   restarting: boolean;
+  /** Set to true when health check already cleaned up counters for this group.
+   *  Prevents double-decrement when runForGroup/runTask finally block runs later. */
+  _cleanedByHealthCheck: boolean;
 }
 
 type ActiveGroupState = GroupState & { groupFolder: string };
@@ -59,6 +62,9 @@ export class GroupQueue {
   private userConcurrentLimitFn:
     | ((groupJid: string) => { allowed: boolean })
     | null = null;
+  private healthCheckTimer: ReturnType<typeof setInterval> | null = null;
+  /** Tracks when each group became active, for stuck detection */
+  private activeStartTimes = new Map<string, number>();
 
   private getGroup(groupJid: string): GroupState {
     let state = this.groups.get(groupJid);
@@ -76,6 +82,7 @@ export class GroupQueue {
         retryCount: 0,
         retryTimer: null,
         restarting: false,
+        _cleanedByHealthCheck: false,
       };
       this.groups.set(groupJid, state);
     }
@@ -84,6 +91,73 @@ export class GroupQueue {
 
   setProcessMessagesFn(fn: (groupJid: string) => Promise<boolean>): void {
     this.processMessagesFn = fn;
+    this.startHealthCheck();
+  }
+
+  /**
+   * 定期检查活跃进程是否已死。
+   * 每 30 秒扫描一次：如果进程的 exitCode 已设置但 state.active 仍然为 true，
+   * 说明 close 事件的清理逻辑没有正常执行，需要强制恢复状态。
+   */
+  private startHealthCheck(): void {
+    if (this.healthCheckTimer) return;
+
+    const HEALTH_CHECK_INTERVAL = 30_000; // 30 秒
+
+    this.healthCheckTimer = setInterval(() => {
+      if (this.shuttingDown) return;
+
+      for (const [jid, state] of this.groups) {
+        if (!state.active) continue;
+
+        const proc = state.process;
+        if (!proc) continue;
+
+        // 检查进程是否已退出但 state 未清理
+        const isExited = proc.exitCode !== null || proc.signalCode !== null;
+        if (isExited) {
+          logger.error(
+            {
+              groupJid: jid,
+              exitCode: proc.exitCode,
+              signalCode: proc.signalCode,
+              groupFolder: state.groupFolder,
+            },
+            'Health check: detected zombie active state (process exited but state.active=true), forcing cleanup',
+          );
+
+          // 强制清理状态 — 模拟 finally 块的行为
+          // 设置标志防止 finally 块再次递减计数器
+          const isHostMode = this.isHostMode(jid);
+          state._cleanedByHealthCheck = true;
+          state.active = false;
+          state.activeRunnerIsTask = false;
+          state.process = null;
+          state.containerName = null;
+          state.displayName = null;
+          state.groupFolder = null;
+          state.agentId = null;
+          this.activeCount = Math.max(0, this.activeCount - 1);
+          if (isHostMode) {
+            this.activeHostProcessCount = Math.max(0, this.activeHostProcessCount - 1);
+          } else {
+            this.activeContainerCount = Math.max(0, this.activeContainerCount - 1);
+          }
+          this.activeStartTimes.delete(jid);
+
+          try {
+            this.onContainerExitFn?.(jid);
+          } catch (err) {
+            logger.error({ groupJid: jid, err }, 'onContainerExit callback failed (health check)');
+          }
+          try {
+            this.drainGroup(jid);
+          } catch (err) {
+            logger.error({ groupJid: jid, err }, 'drainGroup failed (health check)');
+          }
+        }
+      }
+    }, HEALTH_CHECK_INTERVAL);
   }
 
   setHostModeChecker(fn: (groupJid: string) => boolean): void {
@@ -677,6 +751,7 @@ export class GroupQueue {
     state.pendingMessages = false;
     this.waitingGroups.delete(groupJid);
     this.activeCount++;
+    this.activeStartTimes.set(groupJid, Date.now());
     if (isHostMode) {
       this.activeHostProcessCount++;
     } else {
@@ -706,20 +781,26 @@ export class GroupQueue {
       logger.error({ groupJid, err }, 'Error processing messages for group');
       this.scheduleRetry(groupJid, state);
     } finally {
+      // 如果健康检查已经清理过，跳过计数器递减（防止双重递减）
+      const alreadyCleaned = state._cleanedByHealthCheck;
+      state._cleanedByHealthCheck = false;
       state.active = false;
       state.process = null;
       state.containerName = null;
       state.displayName = null;
       state.groupFolder = null;
       state.agentId = null;
-      this.activeCount--;
-      if (isHostMode) {
-        this.activeHostProcessCount--;
-      } else {
-        this.activeContainerCount--;
+      if (!alreadyCleaned) {
+        this.activeCount--;
+        if (isHostMode) {
+          this.activeHostProcessCount--;
+        } else {
+          this.activeContainerCount--;
+        }
       }
+      this.activeStartTimes.delete(groupJid);
       try {
-        this.onContainerExitFn?.(groupJid);
+        if (!alreadyCleaned) this.onContainerExitFn?.(groupJid);
       } catch (err) {
         logger.error({ groupJid, err }, 'onContainerExit callback failed');
       }
@@ -738,6 +819,7 @@ export class GroupQueue {
     state.activeRunnerIsTask = true;
     this.waitingGroups.delete(groupJid);
     this.activeCount++;
+    this.activeStartTimes.set(groupJid, Date.now());
     if (isHostMode) {
       this.activeHostProcessCount++;
     } else {
@@ -759,6 +841,9 @@ export class GroupQueue {
     } catch (err) {
       logger.error({ groupJid, taskId: task.id, err }, 'Error running task');
     } finally {
+      // 如果健康检查已经清理过，跳过计数器递减（防止双重递减）
+      const alreadyCleaned = state._cleanedByHealthCheck;
+      state._cleanedByHealthCheck = false;
       state.active = false;
       state.activeRunnerIsTask = false;
       state.process = null;
@@ -766,14 +851,17 @@ export class GroupQueue {
       state.displayName = null;
       state.groupFolder = null;
       state.agentId = null;
-      this.activeCount--;
-      if (isHostMode) {
-        this.activeHostProcessCount--;
-      } else {
-        this.activeContainerCount--;
+      if (!alreadyCleaned) {
+        this.activeCount--;
+        if (isHostMode) {
+          this.activeHostProcessCount--;
+        } else {
+          this.activeContainerCount--;
+        }
       }
+      this.activeStartTimes.delete(groupJid);
       try {
-        this.onContainerExitFn?.(groupJid);
+        if (!alreadyCleaned) this.onContainerExitFn?.(groupJid);
       } catch (err) {
         logger.error({ groupJid, err }, 'onContainerExit callback failed');
       }
@@ -936,6 +1024,12 @@ export class GroupQueue {
 
   async shutdown(gracePeriodMs: number): Promise<void> {
     this.shuttingDown = true;
+
+    // 停止健康检查
+    if (this.healthCheckTimer) {
+      clearInterval(this.healthCheckTimer);
+      this.healthCheckTimer = null;
+    }
 
     // 清除所有待执行的重试定时器，防止关闭期间容器重启
     for (const state of this.groups.values()) {

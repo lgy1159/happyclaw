@@ -498,7 +498,25 @@ export async function runContainerAgent(
 
     let timeout = setTimeout(killOnTimeout, timeoutMs);
 
+    // 首次输出超时：容器启动后 120 秒内没有任何输出，视为启动失败
+    const FIRST_OUTPUT_TIMEOUT = 120_000;
+    let hasAnyOutput = false;
+    const firstOutputTimer = setTimeout(() => {
+      if (!hasAnyOutput) {
+        logger.error(
+          { group: group.name, containerName },
+          'Container produced no output within first-output timeout, stopping',
+        );
+        timedOut = true;
+        execFile('docker', ['stop', containerName], { timeout: 15000 }, (err) => {
+          if (err) container.kill('SIGKILL');
+        });
+      }
+    }, FIRST_OUTPUT_TIMEOUT);
+
     const resetTimeout = () => {
+      hasAnyOutput = true;
+      clearTimeout(firstOutputTimer);
       clearTimeout(timeout);
       timeout = setTimeout(killOnTimeout, timeoutMs);
     };
@@ -516,6 +534,7 @@ export async function runContainerAgent(
 
     container.on('close', (code, signal) => {
       clearTimeout(timeout);
+      clearTimeout(firstOutputTimer);
       const duration = Date.now() - startTime;
 
       const closeCtx: CloseHandlerContext = {
@@ -560,6 +579,7 @@ export async function runContainerAgent(
 
     container.on('error', (err) => {
       clearTimeout(timeout);
+      clearTimeout(firstOutputTimer);
       logger.error(
         { group: group.name, containerName, error: err },
         'Container spawn error',
@@ -1044,7 +1064,28 @@ export async function runHostAgent(
 
     let timeout = setTimeout(killOnTimeout, timeoutMs);
 
+    // 首次输出超时：进程启动后 120 秒内没有任何输出，视为启动失败
+    const FIRST_OUTPUT_TIMEOUT = 120_000;
+    let hasAnyOutput = false;
+    const firstOutputTimer = setTimeout(() => {
+      if (!hasAnyOutput && !settled) {
+        logger.error(
+          { group: group.name, processId },
+          'Host agent produced no output within first-output timeout, killing',
+        );
+        timedOut = true;
+        killProcessTree(proc, 'SIGTERM');
+        killTimer = setTimeout(() => {
+          if (proc.exitCode === null && proc.signalCode === null) {
+            killProcessTree(proc, 'SIGKILL');
+          }
+        }, 5000);
+      }
+    }, FIRST_OUTPUT_TIMEOUT);
+
     const resetTimeout = () => {
+      hasAnyOutput = true;
+      clearTimeout(firstOutputTimer);
       clearTimeout(timeout);
       timeout = setTimeout(killOnTimeout, timeoutMs);
     };
@@ -1063,6 +1104,7 @@ export async function runHostAgent(
     // 11. close 事件处理
     proc.on('close', (code, signal) => {
       clearTimeout(timeout);
+      clearTimeout(firstOutputTimer);
       if (killTimer) clearTimeout(killTimer);
       const duration = Date.now() - startTime;
 
@@ -1102,6 +1144,8 @@ export async function runHostAgent(
 
     proc.on('error', (err) => {
       clearTimeout(timeout);
+      clearTimeout(firstOutputTimer);
+      if (killTimer) clearTimeout(killTimer);
       logger.error(
         { group: group.name, processId, error: err },
         'Host agent spawn error',

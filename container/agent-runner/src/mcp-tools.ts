@@ -25,6 +25,8 @@ export interface McpContext {
   workspaceGroup: string;
   workspaceGlobal: string;
   workspaceMemory: string;
+  /** When running as a conversation agent, messages route to the agent's virtual chat. */
+  agentId?: string;
 }
 
 function writeIpcFile(dir: string, data: object): string {
@@ -120,6 +122,10 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
   const TASKS_DIR = path.join(ctx.workspaceIpc, 'tasks');
   const hasCrossGroupAccess = ctx.isAdminHome;
   const toRelativePath = createToRelativePath(ctx);
+  // Conversation agents route send_message to their virtual chat JID
+  const messageChatJid = ctx.agentId
+    ? `${ctx.chatJid}#agent:${ctx.agentId}`
+    : ctx.chatJid;
 
   const tools: SdkMcpToolDefinition<any>[] = [
     // --- send_message ---
@@ -130,7 +136,7 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
       async (args) => {
         const data = {
           type: 'message',
-          chatJid: ctx.chatJid,
+          chatJid: messageChatJid,
           text: args.text,
           groupFolder: ctx.groupFolder,
           timestamp: new Date().toISOString(),
@@ -248,7 +254,7 @@ export function createMcpTools(ctx: McpContext): SdkMcpToolDefinition<any>[] {
 
         const data = {
           type: 'image',
-          chatJid: ctx.chatJid,
+          chatJid: messageChatJid,
           imageBase64: base64,
           mimeType,
           caption: args.caption || undefined,
@@ -361,7 +367,7 @@ Supports: PDF, DOC, XLS, PPT, MP4, etc. Max file size: 30MB.`,
 
         const data = {
           type: 'send_file',
-          chatJid: ctx.chatJid,
+          chatJid: messageChatJid,
           filePath: relativePath,
           fileName: args.fileName,
           timestamp: new Date().toISOString(),
