@@ -402,7 +402,11 @@ export class GroupQueue {
     // reply would never reach the user.  Returning 'no_active' causes the
     // caller to enqueue a fresh message-processing run that will execute once
     // the task finishes.  See GitHub issue riba2534/happyclaw#151.
-    if (state.activeRunnerIsTask) {
+    //
+    // Exception: conversation agents (state.agentId is set) are started via
+    // enqueueTask but ARE user-interactive — they must accept follow-up
+    // messages via IPC so the user can chat with the running agent process.
+    if (state.activeRunnerIsTask && !state.agentId) {
       logger.debug(
         { groupJid },
         'Active runner is a scheduled task; deferring user message until task completes',

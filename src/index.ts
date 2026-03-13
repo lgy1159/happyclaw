@@ -3578,11 +3578,12 @@ async function processAgentConversation(
         unregisterStreamingSession(streamingSessionJid);
       }
     }
-  }
 
-  // Process ended → set status back to idle (conversation agents persist)
-  updateAgentStatus(agentId, 'idle');
-  broadcastAgentStatus(chatJid, agentId, 'idle', agent.name, agent.prompt);
+    // Process ended → set status back to idle (conversation agents persist)
+    // Must be inside finally to guarantee cleanup even if wrappedOnOutput hangs.
+    updateAgentStatus(agentId, 'idle');
+    broadcastAgentStatus(chatJid, agentId, 'idle', agent.name, agent.prompt);
+  }
 }
 
 async function startMessageLoop(): Promise<void> {
