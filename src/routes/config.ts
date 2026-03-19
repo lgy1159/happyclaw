@@ -400,6 +400,11 @@ configRoutes.put(
       // Update .credentials.json in all session directories when credentials change
       if (validation.data.claudeOAuthCredentials) {
         updateAllSessionCredentials(saved);
+      }
+
+      // Stop all running containers so they restart with fresh credentials.
+      // Applies to both claudeOAuthCredentials and claudeCodeOauthToken changes.
+      if (hasOfficialSecretChanges) {
         deps?.queue?.closeAllActiveForCredentialRefresh();
       }
 
@@ -930,8 +935,10 @@ configRoutes.post(
       // Write .credentials.json to all session directories
       if (oauthCredentials) {
         updateAllSessionCredentials(saved);
-        deps?.queue?.closeAllActiveForCredentialRefresh();
       }
+
+      // Always stop running containers so they restart with fresh credentials
+      deps?.queue?.closeAllActiveForCredentialRefresh();
 
       appendClaudeConfigAudit(actor, 'oauth_login', [
         oauthCredentials
